@@ -313,7 +313,6 @@ GITHUB_USERNAME = "moduguakhileshkumar"  # Replace with your GitHub Username
 REPO_NAME = "Audio-Fingerprinting"              # Replace with your GitHub Repo Name
 RELEASE_TAG = "V1.0"                      # Replace with your Release Tag
 
-@st.cache_resource
 def check_and_download_db():
     if os.path.exists(DB_SQLITE):
         return True
