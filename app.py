@@ -293,7 +293,12 @@ st.markdown("""
 # Initialize FFmpeg path
 @st.cache_resource
 def init_ffmpeg():
-    static_ffmpeg.add_paths()
+    try:
+        static_ffmpeg.add_paths()
+    except Exception as e:
+        # On cloud Linux servers where packages.txt installs ffmpeg system-wide,
+        # static_ffmpeg is not needed and might fail due to write permission locks.
+        pass
 
 init_ffmpeg()
 
@@ -304,9 +309,9 @@ DB_SQLITE = "fingerprint_db.sqlite"
 # If deploying to GitHub/Streamlit Cloud, you can upload fingerprint_db.sqlite
 # as a release asset in a GitHub release, and configure your username/repo below.
 # The app will automatically download it on startup!
-GITHUB_USERNAME = "moduguakhileshkumar"  # Replace with your GitHub Username
-REPO_NAME = "Audio Fingerprinting"              # Replace with your GitHub Repo Name
-RELEASE_TAG = "V1.0"                      # Replace with your Release Tag
+GITHUB_USERNAME = "YOUR_GITHUB_USERNAME"  # Replace with your GitHub Username
+REPO_NAME = "YOUR_REPO_NAME"              # Replace with your GitHub Repo Name
+RELEASE_TAG = "v1.0"                      # Replace with your Release Tag
 
 @st.cache_resource
 def check_and_download_db():
@@ -314,7 +319,7 @@ def check_and_download_db():
         return True
     
     # Try downloading from GitHub Release if configured
-    if GITHUB_USERNAME != "moduguakhileshkumar" and REPO_NAME != "Audio Fingerprinting":
+    if GITHUB_USERNAME != "YOUR_GITHUB_USERNAME" and REPO_NAME != "YOUR_REPO_NAME":
         url = f"https://github.com/{GITHUB_USERNAME}/{REPO_NAME}/releases/download/{RELEASE_TAG}/{DB_SQLITE}"
         try:
             with st.spinner("📥 Downloading SQLite database from GitHub Releases (373MB)... This will take a moment."):
