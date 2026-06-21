@@ -1,6 +1,6 @@
 import streamlit as st
 import os
-import pickle
+import sqlite3
 import numpy as np
 import librosa
 import matplotlib
@@ -12,6 +12,7 @@ import static_ffmpeg
 import pandas as pd
 import tempfile
 import time
+import urllib.request
 
 # Page configuration
 st.set_page_config(
@@ -296,51 +297,101 @@ def init_ffmpeg():
 
 init_ffmpeg()
 
-# Load fingerprint database
+# Database File Paths
+DB_SQLITE = "fingerprint_db.sqlite"
+
+# ----------------- CONFIGURATION FOR LIVE LINK DEPLOYMENT -----------------
+# If deploying to GitHub/Streamlit Cloud, you can upload fingerprint_db.sqlite
+# as a release asset in a GitHub release, and configure your username/repo below.
+# The app will automatically download it on startup!
+GITHUB_USERNAME = "moduguakhileshkumar"  # Replace with your GitHub Username
+REPO_NAME = "Audio Fingerprinting"              # Replace with your GitHub Repo Name
+RELEASE_TAG = "V1.0"                      # Replace with your Release Tag
+
 @st.cache_resource
-def load_database():
-    db_path = "fingerprint_db.pkl"
-    if not os.path.exists(db_path):
-        return None
-    with open(db_path, "rb") as f:
-        return pickle.load(f)
+def check_and_download_db():
+    if os.path.exists(DB_SQLITE):
+        return True
+    
+    # Try downloading from GitHub Release if configured
+    if GITHUB_USERNAME != "moduguakhileshkumar" and REPO_NAME != "Audio Fingerprinting":
+        url = f"https://github.com/{GITHUB_USERNAME}/{REPO_NAME}/releases/download/{RELEASE_TAG}/{DB_SQLITE}"
+        try:
+            with st.spinner("📥 Downloading SQLite database from GitHub Releases (373MB)... This will take a moment."):
+                urllib.request.urlretrieve(url, DB_SQLITE)
+            return True
+        except Exception as e:
+            st.error(f"Failed to download database from GitHub: {e}")
+            return False
+    return False
 
-with st.spinner("⏳ Loading fingerprint database (310MB)... This may take 20-30 seconds on the first run. Please wait."):
-    db_data = load_database()
+db_available = check_and_download_db()
 
-if db_data is None:
-    st.error("Fingerprint database not found! Please make sure 'fingerprint_db.pkl' is built and in the app directory.")
+if not os.path.exists(DB_SQLITE):
+    st.error("""
+    ### 📂 SQLite Database File Missing!
+    To run this application, **`fingerprint_db.sqlite`** must be in the app directory.
+    
+    * **Running Locally**: Make sure you run `convert_to_sqlite.py` first to generate the SQLite database from your pickle file.
+    * **Deploying to the Cloud**: Create a GitHub Release in your repository, upload `fingerprint_db.sqlite` as a release asset, and set `GITHUB_USERNAME` and `REPO_NAME` in `app.py` to enable automatic download.
+    """)
     st.stop()
 
-database = db_data["database"]
-song_names = db_data["song_names"]
-
-# Pre-compile song information for Tab 1 (LIBRARY)
+# Helper function to get all song names from SQLite
 @st.cache_resource
-def compile_library_info(_database, song_names):
-    song_hashes_count = defaultdict(int)
-    song_peaks = defaultdict(list)
-    
-    for h_key, occurrences in _database.items():
-        f1, f2, dt = h_key
-        for song_idx, t_db in occurrences:
-            song_hashes_count[song_idx] += 1
-            # Keep coordinates for scatter plot
-            song_peaks[song_idx].append((t_db, f1))
-            
-    compiled_info = {}
-    for song_idx, name in enumerate(song_names):
-        # Sort and unique peaks
-        peaks = list(set(song_peaks[song_idx]))
-        peaks.sort(key=lambda x: x[0])
-        compiled_info[song_idx] = {
-            "name": name,
-            "hashes_count": song_hashes_count[song_idx],
-            "peaks": peaks
-        }
-    return compiled_info
+def get_song_names():
+    conn = sqlite3.connect(DB_SQLITE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM song_names ORDER BY song_idx")
+    names = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return names
 
-library_info = compile_library_info(database, song_names)
+song_names = get_song_names()
+
+# Load only the 8 specific visible songs info for Tab 1 (LIBRARY) to keep startup instant
+@st.cache_resource
+def get_library_info(song_names):
+    conn = sqlite3.connect(DB_SQLITE)
+    cursor = conn.cursor()
+    
+    target_visible_songs = [
+        "The Long And Winding Road",
+        "Two Of Us",
+        "Within You Without You",
+        "A Hard Day's Night",
+        "Let It Be",
+        "Lucy In The Sky With Diamonds",
+        "Penny Lane",
+        "We Can Work It Out"
+    ]
+    
+    library_info = {}
+    for name in target_visible_songs:
+        try:
+            idx = song_names.index(name)
+            
+            # Query hash count
+            cursor.execute("SELECT COUNT(*) FROM fingerprints WHERE song_idx=?", (idx,))
+            hash_count = cursor.fetchone()[0]
+            
+            # Query a sample of 1200 peaks to draw the tiny plot (t_db is x, decode f1 from hash_int)
+            cursor.execute("SELECT t_db, (hash_int >> 16) FROM fingerprints WHERE song_idx=? LIMIT 2000", (idx,))
+            peaks = list(set(cursor.fetchall()))
+            peaks.sort(key=lambda x: x[0])
+            
+            library_info[idx] = {
+                "name": name,
+                "hashes_count": hash_count,
+                "peaks": peaks
+            }
+        except ValueError:
+            pass # Song not in database
+            
+    conn.close()
+    return library_info
+
+library_info = get_library_info(song_names)
 
 # Helper functions for processing and matching
 def get_peaks(y, sr):
@@ -374,17 +425,38 @@ def generate_hashes(peaks):
                 break
     return hashes
 
+# SQLite batch matching algorithm (extremely low memory usage)
 def match_query(q_hashes):
+    conn = sqlite3.connect(DB_SQLITE)
+    cursor = conn.cursor()
+    
     match_counts = defaultdict(int)
     song_offsets = defaultdict(list)
     
+    # Map hash_int -> t_q
+    hash_to_tq = {}
     for h_key, t_q in q_hashes:
-        if h_key in database:
-            for song_idx, t_db in database[h_key]:
-                offset = t_db - t_q
-                match_counts[(song_idx, offset)] += 1
-                song_offsets[song_idx].append(offset)
-                
+        f1, f2, dt = h_key
+        hash_int = int((f1 << 16) | (f2 << 8) | dt)
+        hash_to_tq[hash_int] = t_q
+        
+    hash_ints = list(hash_to_tq.keys())
+    
+    # Query database in chunks of 500 hashes
+    chunk_size = 500
+    for i in range(0, len(hash_ints), chunk_size):
+        chunk = hash_ints[i:i+chunk_size]
+        placeholders = ",".join("?" for _ in chunk)
+        cursor.execute(f"SELECT hash_int, song_idx, t_db FROM fingerprints WHERE hash_int IN ({placeholders})", chunk)
+        
+        for hash_int, song_idx, t_db in cursor.fetchall():
+            t_q = hash_to_tq[hash_int]
+            offset = t_db - t_q
+            match_counts[(song_idx, offset)] += 1
+            song_offsets[song_idx].append(offset)
+            
+    conn.close()
+    
     song_scores = defaultdict(int)
     best_offsets = {}
     for (song_idx, offset), count in match_counts.items():
@@ -405,7 +477,6 @@ with tab_lib:
     st.markdown('<div class="custom-info-box">Song indexing is managed by the admin.<br>Drop a clip in the Identify tab to test the library.</div>', unsafe_allow_html=True)
     st.write("#### IN THE DATABASE")
     
-    # 8 songs displayed in the professor's screenshots
     target_visible_songs = [
         "The Long And Winding Road",
         "Two Of Us",
@@ -429,20 +500,12 @@ with tab_lib:
         "#82ca9d"  # green
     ]
     
-    # Map visible song names to their indices in database
-    visible_song_indices = []
-    for s_name in target_visible_songs:
-        idx = next((i for i, name in enumerate(song_names) if name.lower() == s_name.lower()), None)
-        if idx is not None:
-            visible_song_indices.append(idx)
-            
-    # Add a toggle to show/hide other songs
     cols = st.columns(4)
+    card_idx = 0
     
     # Draw cards for the 8 visible songs
-    for i, idx in enumerate(visible_song_indices):
-        col = cols[i % 4]
-        song_info = library_info[idx]
+    for idx, song_info in library_info.items():
+        col = cols[card_idx % 4]
         
         with col:
             # Container card
@@ -458,7 +521,6 @@ with tab_lib:
             fig.patch.set_facecolor('#121318')
             ax.set_facecolor('#121318')
             
-            # Downsample peaks to 400 points to keep plotting extremely fast
             peaks = song_info['peaks']
             step = max(1, len(peaks) // 400)
             sampled_peaks = peaks[::step]
@@ -466,25 +528,35 @@ with tab_lib:
             times = [p[0] for p in sampled_peaks]
             freqs = [p[1] for p in sampled_peaks]
             
-            ax.scatter(times, freqs, color=card_colors[i % len(card_colors)], s=1.5, alpha=0.6)
+            ax.scatter(times, freqs, color=card_colors[card_idx % len(card_colors)], s=1.5, alpha=0.6)
             ax.set_xlim(0, max(times) if times else 6000)
             ax.set_ylim(0, 512)
             ax.axis('off')
             
             st.pyplot(fig)
             st.write("") # Spacer
+            card_idx += 1
 
     # Toggle for other songs in the database
     with st.expander("Show other songs in database"):
-        other_songs = []
-        for idx, name in enumerate(song_names):
-            if idx not in visible_song_indices:
-                other_songs.append({
-                    "Song Index": idx + 1,
+        conn = sqlite3.connect(DB_SQLITE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT song_idx, name FROM song_names")
+        all_songs = cursor.fetchall()
+        
+        other_songs_list = []
+        for s_idx, name in all_songs:
+            if name not in target_visible_songs:
+                # Query hash count
+                cursor.execute("SELECT COUNT(*) FROM fingerprints WHERE song_idx=?", (s_idx,))
+                hash_count = cursor.fetchone()[0]
+                other_songs_list.append({
+                    "Song Index": s_idx + 1,
                     "Song Title": name,
-                    "Total Hashes": f"{library_info[idx]['hashes_count']:,}"
+                    "Total Hashes": f"{hash_count:,}"
                 })
-        st.dataframe(pd.DataFrame(other_songs), use_container_width=True)
+        conn.close()
+        st.dataframe(pd.DataFrame(other_songs_list), use_container_width=True)
 
 # ==========================================
 # TAB 2: IDENTIFY
@@ -727,9 +799,13 @@ with tab_ident:
             </div>
             """, unsafe_allow_html=True)
             
-            # Plot 2: Large song constellation map with highlight overlay
-            song_info = library_info[best_song_idx]
-            song_peaks = song_info["peaks"]
+            # Query matched song peaks dynamically from SQLite
+            conn = sqlite3.connect(DB_SQLITE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT t_db, (hash_int >> 16) FROM fingerprints WHERE song_idx=? LIMIT 2000", (best_song_idx,))
+            song_peaks = list(set(cursor.fetchall()))
+            song_peaks.sort(key=lambda x: x[0])
+            conn.close()
             
             fig, ax = plt.subplots(figsize=(10, 4.5))
             fig.patch.set_facecolor('#121318')
