@@ -309,9 +309,9 @@ DB_SQLITE = "fingerprint_db.sqlite"
 # If deploying to GitHub/Streamlit Cloud, you can upload fingerprint_db.sqlite
 # as a release asset in a GitHub release, and configure your username/repo below.
 # The app will automatically download it on startup!
-GITHUB_USERNAME = "YOUR_GITHUB_USERNAME"  # Replace with your GitHub Username
-REPO_NAME = "YOUR_REPO_NAME"              # Replace with your GitHub Repo Name
-RELEASE_TAG = "v1.0"                      # Replace with your Release Tag
+GITHUB_USERNAME = "moduguakhileshkumar"  # Replace with your GitHub Username
+REPO_NAME = "Audio-Fingerprinting"              # Replace with your GitHub Repo Name
+RELEASE_TAG = "V1.0"                      # Replace with your Release Tag
 
 @st.cache_resource
 def check_and_download_db():
