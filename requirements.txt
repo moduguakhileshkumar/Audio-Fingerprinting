@@ -1,0 +1,11 @@
+numpy
+scipy
+matplotlib
+pillow
+librosa
+soundfile
+pydub
+streamlit
+static-ffmpeg
+pandas
+reportlab
